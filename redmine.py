@@ -2,16 +2,20 @@ from typing import Any
 import os
 
 import httpx
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.logging import get_logger
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Initialize FastMCP server
 mcp = FastMCP("Redmine Server")
 get_logger(__name__).info("Redmine MCP server initialized.")
 
 # Constants
-REDMINE_URL = ""
-REDMINE_API_KEY = "a05ad1c7cc60ec9cefefba90d3b5c1deaa0dcb70"
+REDMINE_URL = os.getenv("REDMINE_URL", "")
+REDMINE_API_KEY = os.getenv("REDMINE_API_KEY", "")
 
 
 async def make_redmine_request(endpoint: str) -> dict[str, Any] | None:
