@@ -39,6 +39,74 @@ A Model Context Protocol (MCP) server for interacting with Redmine.
    docker run -it redmine-mcp
    ```
 
+## Running with Docker
+
+1. **Build the Docker image:**
+   ```bash
+   docker build -t redmine-mcp .
+   ```
+
+2. **Run the container:**
+   ```bash
+   docker run -it redmine-mcp
+   ```
+
+## Connecting to VS Code
+
+### Using GitHub Copilot (Recommended)
+
+GitHub Copilot now supports MCP servers! The configuration is already set up in `.vscode/settings.json`:
+
+```json
+{
+  "github.copilot.chat.mcp.servers": {
+    "redmine": {
+      "command": "python",
+      "args": ["${workspaceFolder}/redmine.py"]
+    }
+  }
+}
+```
+
+**How to use:**
+1. Open GitHub Copilot Chat (Cmd+Shift+I or click the chat icon)
+2. The Redmine MCP server will be automatically available
+3. Ask Copilot to use the Redmine tools, for example:
+   - "Get all projects from Redmine"
+   - "Show me open issues"
+   - "Get details of issue #123"
+
+### Using Cline Extension (Alternative)
+
+1. **Install Cline extension:**
+   - Open VS Code Extensions (Cmd+Shift+X)
+   - Search for "Cline" by saoudrizwan
+   - Click Install
+
+2. **Configure MCP Server:**
+   - Open Cline settings
+   - Go to MCP Servers section
+   - Add the following configuration:
+   ```json
+   {
+     "mcpServers": {
+       "redmine": {
+         "command": "python",
+         "args": ["${workspaceFolder}/redmine.py"]
+       }
+     }
+   }
+   ```
+
+3. **Or configure globally** (already set up for you):
+   Located at: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`
+
+### Using Claude Code Extension
+
+1. Install "Claude Code for VS Code" by Anthropic
+2. Configure MCP servers in extension settings
+3. Point to the local Python script
+
 ## Available Tools
 
 - `get_issues` - Fetch issues from Redmine
