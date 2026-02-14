@@ -11,7 +11,8 @@ load_dotenv()
 
 # Initialize FastMCP server
 mcp = FastMCP("Redmine Server")
-get_logger(__name__).info("Redmine MCP server initialized.")
+logger = get_logger(__name__)
+logger.info("Redmine MCP server initialized.")
 
 # Constants
 REDMINE_URL = os.getenv("REDMINE_URL", "")
@@ -31,7 +32,7 @@ async def make_redmine_request(endpoint: str) -> dict[str, Any] | None:
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            get_logger(__name__).error(f"Error making Redmine request: {e}")
+            logger.error(f"Error making Redmine request: {e}")
             return None
 
 
@@ -45,7 +46,6 @@ async def download_file(url: str, output_path: str) -> bool:
     Returns:
         True if download successful, False otherwise
     """
-    logger = get_logger(__name__)
     headers = {
         'X-Redmine-API-Key': REDMINE_API_KEY,
     }
@@ -133,7 +133,7 @@ async def get_issues(project_id: str = "", status: str = "open", limit: int = 25
         return "Unable to fetch issues or no issues found."
     
     if not data["issues"]:
-        get_logger(__name__).info(f"No {status} issues found for project '{project_id}'." if project_id else f"No {status} issues found.")
+        logger.info(f"No {status} issues found for project '{project_id}'." if project_id else f"No {status} issues found.")
         return f"No {status} issues found."
     
     issues = [format_issue(issue) for issue in data["issues"]]
@@ -229,7 +229,6 @@ async def download_issue_attachments(issue_id: int, output_dir: str = "./downloa
     Returns:
         Status message with download results
     """
-    logger = get_logger(__name__)
     
     # Convert to absolute path
     output_dir = os.path.abspath(output_dir)
