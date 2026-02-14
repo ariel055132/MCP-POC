@@ -45,26 +45,50 @@ async def download_file(url: str, output_path: str) -> bool:
     Returns:
         True if download successful, False otherwise
     """
+    logger = get_logger(__name__)
     headers = {
         'X-Redmine-API-Key': REDMINE_API_KEY,
     }
-    async with httpx.AsyncClient(verify=False) as client:
-        try:
+    
+    try:
+        # Convert to absolute path
+        output_path = os.path.abspath(output_path)
+        output_dir = os.path.dirname(output_path)
+        
+        # Create directory if it doesn't exist
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            logger.info(f"Ensured directory exists: {output_dir}")
+        
+        logger.info(f"Downloading from {url} to {output_path}")
+        
+        async with httpx.AsyncClient(verify=False) as client:
             response = await client.get(url, headers=headers, timeout=60.0)
             response.raise_for_status()
             
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            content = response.content
+            logger.info(f"Downloaded {len(content)} bytes")
             
-            # Write file
+            # Write file with explicit flush
             with open(output_path, 'wb') as f:
-                f.write(response.content)
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
             
-            get_logger(__name__).info(f"Downloaded file to {output_path}")
-            return True
-        except Exception as e:
-            get_logger(__name__).error(f"Error downloading file: {e}")
-            return False
+            # Verify file was written
+            if os.path.exists(output_path):
+                actual_size = os.path.getsize(output_path)
+                logger.info(f"File written successfully: {output_path} ({actual_size} bytes)")
+                return True
+            else:
+                logger.error(f"File not found after write: {output_path}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"Error downloading file from {url}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
 
 
 def format_issue(issue: dict) -> str:
@@ -109,6 +133,7 @@ async def get_issues(project_id: str = "", status: str = "open", limit: int = 25
         return "Unable to fetch issues or no issues found."
     
     if not data["issues"]:
+        get_logger(__name__).info(f"No {status} issues found for project '{project_id}'." if project_id else f"No {status} issues found.")
         return f"No {status} issues found."
     
     issues = [format_issue(issue) for issue in data["issues"]]
@@ -204,6 +229,12 @@ async def download_issue_attachments(issue_id: int, output_dir: str = "./downloa
     Returns:
         Status message with download results
     """
+    logger = get_logger(__name__)
+    
+    # Convert to absolute path
+    output_dir = os.path.abspath(output_dir)
+    logger.info(f"Output directory (absolute): {output_dir}")
+    
     # Get issue details with attachments
     endpoint = f"issues/{issue_id}.json?include=attachments"
     data = await make_redmine_request(endpoint)
@@ -217,32 +248,63 @@ async def download_issue_attachments(issue_id: int, output_dir: str = "./downloa
     if not attachments:
         return f"Issue #{issue_id} has no attachments."
     
+    logger.info(f"Found {len(attachments)} attachment(s) for issue #{issue_id}")
+    
     # Create issue-specific directory
     issue_dir = os.path.join(output_dir, f"issue_{issue_id}")
+    try:
+        os.makedirs(issue_dir, exist_ok=True)
+        logger.info(f"Created directory: {issue_dir}")
+        # Verify directory exists
+        if not os.path.isdir(issue_dir):
+            return f"Error: Failed to create directory {issue_dir}"
+    except OSError as e:
+        logger.error(f"Failed to create directory {issue_dir}: {e}")
+        return f"Error: Unable to create directory {issue_dir}. {e}"
     
     results = []
     success_count = 0
     
-    for attachment in attachments:
+    for i, attachment in enumerate(attachments, 1):
         filename = attachment.get("filename", "unknown")
         content_url = attachment.get("content_url")
         filesize = attachment.get("filesize", 0)
         
+        logger.info(f"Processing attachment {i}/{len(attachments)}: {filename}")
+        
         if not content_url:
-            results.append(f"{filename}: No download URL available")
+            msg = f"{filename}: No download URL available"
+            results.append(msg)
+            logger.warning(msg)
             continue
         
         output_path = os.path.join(issue_dir, filename)
+        logger.info(f"Will save to: {output_path}")
         
         # Download the file
         if await download_file(content_url, output_path):
             success_count += 1
-            results.append(f"{filename} ({filesize} bytes) → {output_path}")
+            # Verify file exists and get actual size
+            if os.path.exists(output_path):
+                actual_size = os.path.getsize(output_path)
+                msg = f"{filename} ({filesize} bytes) → {output_path} [Verified: {actual_size} bytes]"
+                results.append(msg)
+                logger.info(f"Successfully downloaded: {filename}")
+            else:
+                msg = f"{filename}: Downloaded but file not found on disk"
+                results.append(msg)
+                logger.error(msg)
         else:
-            results.append(f"{filename}: Download failed")
+            msg = f"{filename}: Download failed"
+            results.append(msg)
+            logger.error(msg)
     
     summary = f"Downloaded {success_count}/{len(attachments)} attachments from issue #{issue_id}\n\n"
     summary += "\n".join(results)
+    
+    # Final verification
+    logger.info(f"Download complete: {success_count}/{len(attachments)} successful")
+    logger.info(f"Files should be in: {issue_dir}")
     
     return summary
 
