@@ -17,3 +17,12 @@ logger.info("Elastic MCP server initialized.")
 # Constants
 ELASTIC_URL = os.getenv("ELASTIC_URL", "")
 ELASTIC_API_KEY = os.getenv("ELASTIC_API_KEY", "")
+
+
+
+def main():
+    # Initialize and run the server
+    mcp.run(transport="stdio")
+
+if __name__ == "__main__":
+    main()
