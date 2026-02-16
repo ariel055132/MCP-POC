@@ -1,6 +1,7 @@
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Union
 import os
 import json
+from urllib.parse import quote
 
 import httpx
 from dotenv import load_dotenv
@@ -21,79 +22,55 @@ KIBANA_API_KEY = os.getenv("KIBANA_API_KEY", "")
 DATA_VIEW_ID = os.getenv("DATA_VIEW_ID", "86091596-a33a-4b4b-b825-d387bb6e3c5e")
 
 
-def _validate_sort_order(sort_order: str) -> None:
-    """Validate sort order parameter.
+def _encode_rison(obj: Union[Dict, List, str, int, float, bool, None]) -> str:
+    """Encode Python objects to rison format for Kibana URLs.
+    
+    Rison is a URL-friendly data format similar to JSON but more compact.
     
     Args:
-        sort_order: Sort order to validate
-        
-    Raises:
-        ValueError: If sort order is not 'asc' or 'desc'
-    """
-    if sort_order not in ["desc", "asc"]:
-        raise ValueError(f"Invalid sort_order: {sort_order}. Must be 'desc' or 'asc'.")
-
-
-def _build_elasticsearch_query(
-    time_from: str,
-    time_to: str, 
-    query: str,
-    sort_field: str,
-    sort_order: str,
-    size: int,
-    fields: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """Build Elasticsearch query body.
-    
-    Args:
-        time_from: Start time for search range
-        time_to: End time for search range
-        query: KQL or Lucene query string
-        sort_field: Field to sort by
-        sort_order: Sort direction ('asc' or 'desc')
-        size: Maximum number of documents to return
-        fields: List of field names to return
+        obj: Python object to encode (dict, list, str, int, float, bool, None)
         
     Returns:
-        Elasticsearch query body dictionary
+        Rison-encoded string
+        
+    Examples:
+        >>> _encode_rison({"key": "value"})
+        '(key:value)'
+        >>> _encode_rison([1, 2, 3])
+        '!(1,2,3)'
+        >>> _encode_rison(True)
+        '!t'
     """
-    query_body: Dict[str, Any] = {
-        "query": {
-            "bool": {
-                "must": [],
-                "filter": [
-                    {
-                        "range": {
-                            "@timestamp": {
-                                "gte": time_from,
-                                "lte": time_to,
-                                "format": "strict_date_optional_time"
-                            }
-                        }
-                    }
-                ]
-            }
-        },
-        "sort": [{sort_field: {"order": sort_order}}],
-        "size": size
-    }
-    
-    # Add query string if provided
-    if query:
-        query_body["query"]["bool"]["must"].append({
-            "query_string": {
-                "query": query,
-                "analyze_wildcard": True
-            }
-        })
+    if obj is None:
+        return "!n"
+    elif obj is True:
+        return "!t"
+    elif obj is False:
+        return "!f"
+    elif isinstance(obj, (int, float)):
+        return str(obj)
+    elif isinstance(obj, str):
+        # Check if string needs quoting (contains special characters)
+        # Note: dots are NOT special in RISON, but hyphens and underscores can be
+        special_chars = set("':!,()@- ")
+        if any(c in special_chars for c in obj) or obj == "":
+            # Escape single quotes and wrap in quotes
+            escaped = obj.replace("'", "!'")
+            return f"'{escaped}'"
+        return obj
+    elif isinstance(obj, list):
+        if not obj:
+            return "!()"
+        items = ",".join(_encode_rison(item) for item in obj)
+        return f"!({items})"
+    elif isinstance(obj, dict):
+        if not obj:
+            return "()"
+        pairs = ",".join(f"{key}:{_encode_rison(value)}" for key, value in obj.items())
+        return f"({pairs})"
     else:
-        query_body["query"]["bool"]["must"].append({"match_all": {}})
-    
-    # Add source filtering if fields specified
-    if fields:
-        query_body["_source"] = fields
-    
-    return query_body
+        # Fallback to string representation
+        return str(obj)
 
 
 def _format_search_response(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -123,211 +100,162 @@ def _format_search_response(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@mcp.tool(description="Search and retrieve actual log data from Elasticsearch via Kibana")
 async def search_kibana_logs(
     index_pattern: str,
     time_from: str = "now-15m",
     time_to: str = "now",
     query: str = "",
-    fields: Optional[List[str]] = None,
-    sort_field: str = "@timestamp",
-    sort_order: str = "desc",
-    size: int = 100,
-    kibana_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Search logs via Kibana internal bsearch API.
+    fields: str = "",
+    size: int = 100
+) -> str:
+    """Search and retrieve actual log documents from Elasticsearch via Kibana API.
     
-    Queries Elasticsearch through Kibana's internal search API to retrieve log documents
-    matching specified criteria. This endpoint requires proper authentication via API key.
+    Directly queries Elasticsearch through Kibana to fetch log data matching the 
+    specified criteria. Returns the actual log documents as JSON.
     
     Args:
-        index_pattern: Index pattern to search (e.g., "logs-*", "*")
-        time_from: Start time - supports date math (e.g., "now-15m", "now-1d") 
-                   or ISO 8601 format (e.g., "2026-02-06T16:00:00.000Z")
-        time_to: End time - date math or ISO 8601 format (default: "now")
-        query: KQL or Lucene query string (e.g., "log.level:ERROR AND k8s.deployment.name:myapp")
-        fields: List of specific field names to return in results 
-                (e.g., ["logback.mdc.guid", "message", "log.level"])
-                Returns all fields if None
-        sort_field: Field name to sort results by (default: "@timestamp")
-        sort_order: Sort direction - "desc" or "asc" (default: "desc")
+        index_pattern: Index pattern or dataViewId to search
+        time_from: Start time - date math or ISO 8601 format
+        time_to: End time - date math or ISO 8601 format
+        query: KQL or Lucene query string
+        fields: Comma-separated field names to return (returns all if empty)
         size: Maximum number of documents to return (default: 100)
-        kibana_url: Kibana base URL (uses KIBANA_URL env var if None)
-        api_key: API key for authentication (uses KIBANA_API_KEY env var if None)
     
     Returns:
-        Dictionary containing:
-            - total (int): Total number of matching documents
-            - took (int): Search execution time in milliseconds
-            - hits (list): List of matching documents, each containing:
-                - _index: Index name
-                - _id: Document ID
-                - _score: Relevance score (may be None)
-                - _source: Document fields
-    
-    Raises:
-        ValueError: If required configuration is missing or parameters are invalid
-        Exception: If Kibana API request fails or returns unexpected format
-    
-    Examples:
-        >>> # Search error logs from the last hour
-        >>> results = await search_kibana_logs(
-        ...     index_pattern="logs-*",
-        ...     query="log.level:ERROR",
-        ...     time_from="now-1h"
-        ... )
-        >>> print(f"Found {results['total']} errors")
+        JSON string with log documents and metadata
         
-        >>> # Search with specific time range and fields
-        >>> results = await search_kibana_logs(
-        ...     index_pattern="logs-*",
-        ...     time_from="2026-02-06T16:00:00.000Z",
-        ...     time_to="2026-02-16T23:59:59.000Z",
-        ...     fields=["logback.mdc.guid", "logback.mdc.txnCode", "message", "log.level"],
-        ...     query="k8s.deployment.name:backend-service",
-        ...     size=500
-        ... )
+    Examples:
+        Search last hour of logs:
+        - index_pattern: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
+        - time_from: "now-1h"
+        
+        Search errors with specific fields:
+        - index_pattern: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
+        - query: "log.level:ERROR"
+        - fields: "message,log.level,@timestamp"
+        - time_from: "2026-02-06T00:00:00.000Z"
     """
-    # Validate parameters
-    _validate_sort_order(sort_order)
-    
-    # Get configuration from environment if not provided
-    kibana_url = kibana_url or KIBANA_URL
-    api_key = api_key or KIBANA_API_KEY
+    # Get configuration
+    kibana_url = KIBANA_URL
+    api_key = KIBANA_API_KEY
     
     if not kibana_url:
         logger.error("Missing Kibana URL configuration")
-        raise ValueError(
-            "No Kibana URL configured. "
-            "Set KIBANA_URL environment variable or provide kibana_url parameter."
-        )
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No Kibana URL configured. Set KIBANA_URL environment variable."
+        }, indent=2)
     
     if not api_key:
         logger.error("Missing Kibana API key configuration")
-        raise ValueError(
-            "No API key configured. "
-            "Set KIBANA_API_KEY environment variable or provide api_key parameter."
-        )
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No API key configured. Set KIBANA_API_KEY environment variable."
+        }, indent=2)
     
-    # Prepare request
+    # Parse fields
+    field_list: Optional[List[str]] = None
+    if fields:
+        field_list = [f.strip() for f in fields.split(",") if f.strip()]
+    
+    # Use dataViewId if provided, otherwise use as index pattern
+    if not index_pattern:
+        index_pattern = DATA_VIEW_ID
+    
+    # Build Elasticsearch query
+    es_query = {
+        "query": {
+            "bool": {
+                "must": [],
+                "filter": [
+                    {
+                        "range": {
+                            "@timestamp": {
+                                "gte": time_from,
+                                "lte": time_to,
+                                "format": "strict_date_optional_time"
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+        "sort": [{"@timestamp": {"order": "desc"}}],
+        "size": size
+    }
+    
+    # Add query string if provided
+    if query:
+        es_query["query"]["bool"]["must"].append({
+            "query_string": {
+                "query": query,
+                "analyze_wildcard": True
+            }
+        })
+    else:
+        es_query["query"]["bool"]["must"].append({"match_all": {}})
+    
+    # Add field filtering
+    if field_list:
+        es_query["_source"] = field_list
+    
     kibana_url = kibana_url.rstrip("/")
-    
-    query_body = _build_elasticsearch_query(
-        time_from=time_from,
-        time_to=time_to,
-        query=query,
-        sort_field=sort_field,
-        sort_order=sort_order,
-        size=size,
-        fields=fields
-    )
-    
     headers = {
         "Content-Type": "application/json",
         "kbn-xsrf": "true",
         "Authorization": f"ApiKey {api_key}"
     }
     
-    # Try multiple API endpoints as fallbacks
-    endpoints_to_try = [
-        # Test Kibana API connectivity first
-        {
-            "url": f"{kibana_url}/api/status",
-            "payload": {},
-            "name": "kibana status (connectivity test)",
-            "method": "GET"
-        },
-        # Kibana internal bsearch (preferred but may be disabled)
-        {
-            "url": f"{kibana_url}/internal/bsearch",
-            "payload": {
-                "params": {
-                    "index": index_pattern,
-                    "body": query_body,
-                    "rest_total_hits_as_int": True
-                }
-            },
-            "name": "internal bsearch",
-            "method": "POST"
-        }
-    ]
+    # Try Elasticsearch API endpoint
+    search_url = f"{kibana_url}/api/console/proxy?path=/{index_pattern}/_search&method=POST"
     
-    # Execute search with fallback mechanism
-    last_error = None
-    connectivity_test_passed = False
-    
-    for endpoint in endpoints_to_try:
-        try:
-            method = endpoint.get("method", "POST")
-            logger.info(
-                f"Trying {endpoint['name']} ({method} {endpoint['url']})"
+    try:
+        logger.info(f"Searching logs via Kibana API: {search_url}")
+        
+        async with httpx.AsyncClient(
+            verify=False,
+            timeout=30.0,
+            follow_redirects=True
+        ) as client:
+            response = await client.post(
+                search_url,
+                json=es_query,
+                headers=headers
             )
+            response.raise_for_status()
             
-            # Configure httpx with more permissive settings
-            async with httpx.AsyncClient(
-                verify=False,
-                timeout=30.0,
-                http2=False,
-                follow_redirects=True,
-                limits=httpx.Limits(max_connections=5, max_keepalive_connections=2)
-            ) as client:
-                # Use GET or POST depending on endpoint
-                if method == "GET":
-                    response = await client.get(
-                        endpoint["url"],
-                        headers=headers
-                    )
-                else:
-                    response = await client.post(
-                        endpoint["url"],
-                        json=endpoint["payload"],
-                        headers=headers
-                    )
-                
-                response.raise_for_status()
-                
-                # Connectivity test - just verify it works
-                if endpoint["name"] == "kibana status (connectivity test)":
-                    connectivity_test_passed = True
-                    logger.info("✓ Kibana API connectivity verified")
-                    continue
-                
-                response_json = response.json()
-                
-                # Extract Elasticsearch response from Kibana wrapper or use direct response
-                es_response = response_json.get("rawResponse", response_json)
+            data = response.json()
+            result = _format_search_response(data)
             
-            result = _format_search_response(es_response)
-            logger.info(
-                f"Search successful via {endpoint['name']}: "
-                f"{result['total']} documents found in {result['took']}ms"
-            )
-            return result
+            logger.info(f"✓ Search successful: {result['total']} documents found in {result['took']}ms")
             
-        except httpx.HTTPStatusError as e:
-            last_error = f"{endpoint['name']} failed: {e.response.status_code} - {e.response.text}"
-            logger.warning(last_error)
-            continue
-        except httpx.RequestError as e:
-            last_error = f"{endpoint['name']} request failed: {str(e)}"
-            logger.warning(last_error)
-            if endpoint["name"] == "kibana status (connectivity test)":
-                logger.error("Cannot connect to Kibana - check if host.containers.internal resolves correctly")
-            continue
-        except KeyError as e:
-            last_error = f"{endpoint['name']} unexpected response format: {str(e)}"
-            logger.warning(last_error)
-            continue
-        except Exception as e:
-            last_error = f"{endpoint['name']} error: {str(e)}"
-            logger.warning(last_error)
-            continue
-    
-    # If all endpoints failed, raise the last error with more context
-    connectivity_msg = "Connectivity test passed but " if connectivity_test_passed else "Cannot connect to Kibana. "
-    error_msg = f"{connectivity_msg}All search endpoints failed. Last error: {last_error}"
-    logger.error(error_msg)
-    raise Exception(error_msg)
+            return json.dumps(result, indent=2, default=str)
+            
+    except httpx.HTTPStatusError as e:
+        error_msg = f"HTTP {e.response.status_code}: {e.response.text}"
+        logger.error(f"Search request failed: {error_msg}")
+        return json.dumps({
+            "error": "HTTPError",
+            "message": "Failed to search logs",
+            "details": error_msg
+        }, indent=2)
+    except httpx.RequestError as e:
+        error_msg = str(e)
+        logger.error(f"Connection failed: {error_msg}")
+        return json.dumps({
+            "error": "ConnectionError",
+            "message": "Cannot connect to Kibana",
+            "details": error_msg
+        }, indent=2)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Search error: {error_msg}")
+        return json.dumps({
+            "error": "SearchError",
+            "message": "Failed to search logs",
+            "details": error_msg
+        }, indent=2)
 
 
 @mcp.tool(description="Fetch api status of Kibana to verify connectivity")
@@ -427,74 +355,286 @@ async def fetch_kibana_status(
         }, indent=2)
 
 
-@mcp.tool(description="Search logs from Kibana using Discover-style parameters")
+@mcp.tool(description="Generate Kibana Discover URL to view logs in browser (does not fetch actual logs)")
 async def fetch_kibana_logs(
     index_pattern: str,
     time_from: str = "now-15m",
     time_to: str = "now",
     query: str = "",
     fields: str = "",
-    size: int = 100
+    size: int = 100,
+    discover_view_id: str = "a67db0ea-ad22-42af-813f-ffefb7ad1f4f"
 ) -> str:
-    """Fetch logs from Kibana with Discover-like filtering.
+    """Generate Kibana Discover URL for viewing logs with specified filters.
     
-    Searches log documents from Kibana/Elasticsearch indices with time-based filtering,
-    KQL queries, and field selection.
+    Creates a browser-accessible URL to view logs in Kibana Discover with time-based
+    filtering, KQL queries, custom columns, and index pattern selection.
     
     Args:
-        index_pattern: Index pattern to search (e.g., "logs-*", "*")
+        index_pattern: Index pattern or dataViewId (e.g., "86091596-a33a-4b4b-b825-d387bb6e3c5e", "logs-*")
         time_from: Start time - date math (e.g., "now-15m", "now-1d") or ISO 8601
+                   (e.g., "2026-02-06T00:00:00.000Z")
         time_to: End time - date math or ISO 8601 (default: "now")
         query: KQL or Lucene query string (e.g., "log.level:ERROR")
-        fields: Comma-separated field names to return (e.g., "message,log.level")
-        size: Maximum number of results (default: 100, max: 10000)
+        fields: Comma-separated field names to display as columns 
+                (e.g., "logback.mdc.guid,message,log.level")
+                Default columns will be used if not specified
+        size: Maximum results (unused, kept for compatibility)
+        discover_view_id: Kibana Discover saved search view ID
     
     Returns:
-        JSON string containing search results or error message
+        JSON string containing the Discover URL and parameters
         
     Examples:
-        Search all logs from past hour:
-        - index_pattern: "logs-*"
+        Generate URL for logs from past hour:
+        - index_pattern: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
         - time_from: "now-1h"
+        - time_to: "now"
         
-        Search errors with specific fields:
-        - index_pattern: "logs-*"
+        Generate URL with custom columns and query:
+        - index_pattern: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
         - query: "log.level:ERROR"
-        - fields: "logback.mdc.guid,message,log.level"
-        - time_from: "2026-02-06T16:00:00"
+        - fields: "logback.mdc.guid,logback.mdc.txnCode,message,log.level"
+        - time_from: "2026-02-06T00:00:00.000Z"
+        - time_to: "2026-02-16T23:59:59.000Z"
     """
-    # Parse comma-separated fields into list
-    field_list: Optional[List[str]] = None
+    logger.info(f"Generating Kibana Discover URL for index pattern: {index_pattern}")
+    
+    # Get base URL from environment
+    base_url = KIBANA_URL
+    
+    if not base_url:
+        logger.error("Missing Kibana URL configuration")
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No Kibana URL configured. Set KIBANA_URL environment variable."
+        }, indent=2)
+    
+    # Replace host.containers.internal with localhost for browser access
+    if "host.containers.internal" in base_url:
+        base_url = base_url.replace("host.containers.internal", "localhost")
+        logger.info(f"Converted container URL to browser-accessible URL: {base_url}")
+    
+    # Parse comma-separated fields into list for columns
+    columns_list: Optional[List[str]] = None
     if fields:
-        field_list = [f.strip() for f in fields.split(",") if f.strip()]
+        columns_list = [f.strip() for f in fields.split(",") if f.strip()]
     
     try:
-        logger.info("Initiating Kibana log search via MCP tool")
-        results = await search_kibana_logs(
-            index_pattern=index_pattern,
+        discover_url = _build_discover_url(
+            kibana_base_url=base_url,
+            view_id=discover_view_id,
             time_from=time_from,
             time_to=time_to,
             query=query,
-            fields=field_list,
-            size=size
+            index_pattern=index_pattern,
+            columns=columns_list
         )
         
-        return json.dumps(results, indent=2, default=str)
+        logger.info(f"✓ Discover URL generated successfully")
         
-    except ValueError as e:
-        # Configuration or validation errors
-        logger.error(f"Validation error: {e}")
-        return json.dumps({
-            "error": "ValidationError",
-            "message": str(e)
-        }, indent=2)
+        result = {
+            "discover_url": discover_url,
+            "parameters": {
+                "index_pattern": index_pattern or DATA_VIEW_ID,
+                "time_from": time_from,
+                "time_to": time_to,
+                "query": query or "(all)",
+                "columns": columns_list or "default",
+                "view_id": discover_view_id
+            },
+            "message": "Open this URL in your browser to view logs in Kibana Discover"
+        }
+        
+        return json.dumps(result, indent=2)
+        
     except Exception as e:
-        # API or unexpected errors
-        logger.error(f"Search failed: {e}")
+        error_msg = str(e)
+        logger.error(f"Failed to generate Discover URL: {error_msg}")
         return json.dumps({
-            "error": "SearchError",
-            "message": "Failed to fetch logs. Check Kibana configuration and credentials.",
-            "details": str(e)
+            "error": "URLGenerationError",
+            "message": "Failed to generate Discover URL",
+            "details": error_msg
+        }, indent=2)
+
+
+def _build_discover_url(
+    kibana_base_url: str,
+    view_id: str,
+    time_from: str,
+    time_to: str,
+    query: str = "",
+    index_pattern: str = "",
+    columns: Optional[List[str]] = None
+) -> str:
+    """Build Kibana Discover URL with query parameters.
+    
+    Creates a URL that opens Kibana Discover with pre-populated search criteria including
+    time range, query filters, index pattern, and column display settings.
+    
+    Args:
+        kibana_base_url: Base Kibana URL (e.g., "https://localhost/kibana")
+        view_id: Discover view ID (e.g., "a67db0ea-ad22-42af-813f-ffefb7ad1f4f")
+        time_from: Start time - date math or ISO 8601 format
+        time_to: End time - date math or ISO 8601 format
+        query: KQL or Lucene query string
+        index_pattern: Index pattern to search (dataViewId if available)
+        columns: List of field names to display as columns
+        
+    Returns:
+        Complete Kibana Discover URL with encoded parameters
+    """
+    kibana_base_url = kibana_base_url.rstrip("/")
+    
+    # Use DATA_VIEW_ID from environment if no index_pattern provided
+    data_view_id = index_pattern or DATA_VIEW_ID
+    
+    # Build global state (_g) with time range and filters
+    global_state = {
+        "filters": [],
+        "refreshInterval": {
+            "pause": True,
+            "value": 60000
+        },
+        "time": {
+            "from": time_from,
+            "to": time_to
+        }
+    }
+    
+    # Default columns if none provided
+    if columns is None:
+        columns = [
+            "logback.mdc.guid",
+            "logback.mdc.txnCode",
+            "message",
+            "log.level",
+            "k8s.deployment.name"
+        ]
+    
+    # Build app state (_a) with dataSource, query, columns, and view settings
+    app_state: Dict[str, Any] = {
+        "columns": columns,
+        "dataSource": {
+            "dataViewId": data_view_id,
+            "type": "dataView"
+        },
+        "filters": [],
+        "hideChart": False,
+        "interval": "auto",
+        "query": {
+            "language": "kuery",
+            "query": query
+        },
+        "sort": [["@timestamp", "desc"]],
+        "viewMode": "documents"
+    }
+    
+    # Encode states to rison format and URL-encode
+    g_param = quote(_encode_rison(global_state))
+    a_param = quote(_encode_rison(app_state))
+    
+    # Build final URL
+    discover_url = f"{kibana_base_url}/app/discover#/view/{view_id}?_g={g_param}&_a={a_param}"
+    
+    return discover_url
+
+
+@mcp.tool(description="Generate Kibana Discover URL with time range and query parameters")
+async def generate_kibana_discover_url(
+    view_id: str,
+    time_from: str = "now-15m",
+    time_to: str = "now",
+    query: str = "",
+    index_pattern: str = "",
+    columns: str = "",
+    kibana_url: Optional[str] = None
+) -> str:
+    """Generate a Kibana Discover URL with pre-populated search parameters.
+    
+    Creates a URL that can be opened in a browser to view logs in Kibana Discover
+    with specified time range, query filters, columns, and index pattern.
+    
+    Args:
+        view_id: Discover saved search view ID (e.g., "a67db0ea-ad22-42af-813f-ffefb7ad1f4f")
+        time_from: Start time - supports date math (e.g., "now-15m", "now-1h", "now-1d")
+                   or ISO 8601 format (e.g., "2026-02-06T16:00:00.000Z")
+        time_to: End time - date math or ISO 8601 format (default: "now")
+        query: KQL or Lucene query string (e.g., "log.level:ERROR AND k8s.deployment.name:myapp")
+        index_pattern: Index pattern or dataViewId (e.g., "86091596-a33a-4b4b-b825-d387bb6e3c5e")
+        columns: Comma-separated field names to display (e.g., "field1,field2,field3")
+        kibana_url: Kibana base URL (uses KIBANA_URL env var if None)
+                    Note: Use "https://localhost/kibana" not "host.containers.internal"
+    
+    Returns:
+        JSON string containing the generated Discover URL or error message
+        
+    Examples:
+        Generate URL for last 1 hour:
+        - view_id: "a67db0ea-ad22-42af-813f-ffefb7ad1f4f"
+        - time_from: "now-1h"
+        - time_to: "now"
+        
+        Generate URL with query and custom columns:
+        - view_id: "a67db0ea-ad22-42af-813f-ffefb7ad1f4f"
+        - time_from: "2026-02-16T00:00:00.000Z"
+        - time_to: "2026-02-16T23:59:59.000Z"
+        - query: "log.level:ERROR"
+        - index_pattern: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
+        - columns: "logback.mdc.guid,message,log.level"
+    """
+    # Get base URL from environment if not provided
+    base_url = kibana_url or KIBANA_URL
+    
+    if not base_url:
+        logger.error("Missing Kibana URL configuration")
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No Kibana URL configured. Set KIBANA_URL environment variable or provide kibana_url parameter."
+        }, indent=2)
+    
+    # Replace host.containers.internal with localhost for browser access
+    if "host.containers.internal" in base_url:
+        base_url = base_url.replace("host.containers.internal", "localhost")
+        logger.info(f"Converted container URL to browser-accessible URL: {base_url}")
+    
+    # Parse comma-separated columns into list
+    columns_list: Optional[List[str]] = None
+    if columns:
+        columns_list = [c.strip() for c in columns.split(",") if c.strip()]
+    
+    try:
+        discover_url = _build_discover_url(
+            kibana_base_url=base_url,
+            view_id=view_id,
+            time_from=time_from,
+            time_to=time_to,
+            query=query,
+            index_pattern=index_pattern,
+            columns=columns_list
+        )
+        
+        logger.info(f"Generated Discover URL: {discover_url}")
+        
+        return json.dumps({
+            "discover_url": discover_url,
+            "parameters": {
+                "view_id": view_id,
+                "time_from": time_from,
+                "time_to": time_to,
+                "query": query or "(all)",
+                "index_pattern": index_pattern or DATA_VIEW_ID,
+                "columns": columns_list or "default"
+            }
+        }, indent=2)
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Failed to generate Discover URL: {error_msg}")
+        return json.dumps({
+            "error": "URLGenerationError",
+            "message": "Failed to generate Discover URL",
+            "details": error_msg
         }, indent=2)
 
 
