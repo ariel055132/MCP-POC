@@ -31,4 +31,4 @@ COPY .env .
 RUN mkdir -p /app/downloads
 
 # Run the MCP server
-CMD ["python", "elastic.py"]
+CMD ["python", "kibana.py"]
