@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-    # Install system dependencies if needed
+# Install system dependencies if needed
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -22,7 +22,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY elastic.py .
+COPY kibana.py .
 
 # Copy .env file (make sure it exists before building)
 COPY .env .
