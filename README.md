@@ -1,9 +1,7 @@
-# Redmine MCP Server
+# MCP-POC
+* A Model Context Protocol (MCP) server for interacting with different applications.
 
-A Model Context Protocol (MCP) server for interacting with Redmine.
-
-## Setup
-
+## Setup 
 1. **Configure environment variables:**
    ```bash
    cp .env.example .env
@@ -107,7 +105,7 @@ GitHub Copilot now supports MCP servers! The configuration is already set up in 
 2. Configure MCP servers in extension settings
 3. Point to the local Python script
 
-## Available Tools
+## Available Tools (redmine)
 
 - `get_issues` - Fetch issues from Redmine
 - `get_issue_details` - Get details of a specific issue
