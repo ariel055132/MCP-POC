@@ -19,7 +19,8 @@ logger.info("Kibana MCP server initialized.")
 # Constants
 KIBANA_URL = os.getenv("KIBANA_URL", "")
 KIBANA_API_KEY = os.getenv("KIBANA_API_KEY", "")
-DATA_VIEW_ID = os.getenv("DATA_VIEW_ID", "86091596-a33a-4b4b-b825-d387bb6e3c5e")
+# 86091596-a33a-4b4b-b825-d387bb6e3c5e
+DATA_VIEW_ID = os.getenv("DATA_VIEW_ID", "MID")
 
 
 def _encode_rison(obj: Union[Dict, List, str, int, float, bool, None]) -> str:
@@ -100,6 +101,185 @@ def _format_search_response(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@mcp.tool(description="Get data view details including index pattern and field mappings")
+async def get_data_view(
+    view_id: Optional[str] = None
+) -> str:
+    """Get details of a Kibana data view (index pattern).
+    
+    Retrieves comprehensive information about a data view, including the underlying
+    Elasticsearch index pattern, field mappings, and configuration. This is useful
+    for understanding what indices are being queried.
+    
+    Args:
+        view_id: Data view ID (uses DATA_VIEW_ID env var if None)
+    
+    Returns:
+        JSON string containing data view details including:
+            - id: Data view identifier
+            - title: Index pattern string
+            - fields: Available fields and their types
+            - timeFieldName: Time field used for filtering
+        
+    Examples:
+        Get default data view:
+        - No parameters needed (uses DATA_VIEW_ID from environment)
+        
+        Get specific data view:
+        - view_id: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
+    """
+    kibana_url = KIBANA_URL
+    api_key = KIBANA_API_KEY
+    view_id = view_id or DATA_VIEW_ID
+    
+    if not kibana_url:
+        logger.error("Missing Kibana URL configuration")
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No Kibana URL configured. Set KIBANA_URL environment variable."
+        }, indent=2)
+    
+    if not api_key:
+        logger.error("Missing Kibana API key configuration")
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No API key configured. Set KIBANA_API_KEY environment variable."
+        }, indent=2)
+    
+    kibana_url = kibana_url.rstrip("/")
+    data_view_url = f"{kibana_url}/api/data_views/data_view/{view_id}"
+    
+    headers = {
+        "Authorization": f"ApiKey {api_key}",
+        "kbn-xsrf": "true"
+    }
+    
+    try:
+        logger.info(f"Fetching data view: {view_id}")
+        
+        async with httpx.AsyncClient(
+            verify=False,
+            timeout=10.0,
+            follow_redirects=True
+        ) as client:
+            response = await client.get(data_view_url, headers=headers)
+            response.raise_for_status()
+            
+            data = response.json()
+            logger.info(f"✓ Data view retrieved: {data.get('data_view', {}).get('title', 'N/A')}")
+            
+            return json.dumps(data, indent=2, default=str)
+            
+    except httpx.HTTPStatusError as e:
+        error_msg = f"HTTP {e.response.status_code}: {e.response.text}"
+        logger.error(f"Failed to fetch data view: {error_msg}")
+        return json.dumps({
+            "error": "HTTPError",
+            "message": f"Failed to fetch data view {view_id}",
+            "details": error_msg
+        }, indent=2)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error fetching data view: {error_msg}")
+        return json.dumps({
+            "error": "DataViewError",
+            "message": "Failed to fetch data view",
+            "details": error_msg
+        }, indent=2)
+
+
+@mcp.tool(description="List all available data views in Kibana")
+async def list_data_views() -> str:
+    """List all available data views (index patterns) in Kibana.
+    
+    Retrieves a list of all data views configured in Kibana. Useful for discovering
+    what data sources are available to query.
+    
+    Returns:
+        JSON string with array of data views, each containing:
+            - id: Data view identifier
+            - title: Index pattern
+            - name: Human-readable name
+            - timeFieldName: Time field used for filtering
+        
+    Examples:
+        List all data views:
+        - No parameters needed
+    """
+    kibana_url = KIBANA_URL
+    api_key = KIBANA_API_KEY
+    
+    if not kibana_url:
+        logger.error("Missing Kibana URL configuration")
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No Kibana URL configured."
+        }, indent=2)
+    
+    if not api_key:
+        logger.error("Missing Kibana API key configuration")
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No API key configured."
+        }, indent=2)
+    
+    kibana_url = kibana_url.rstrip("/")
+    data_views_url = f"{kibana_url}/api/data_views"
+    
+    headers = {
+        "Authorization": f"ApiKey {api_key}",
+        "kbn-xsrf": "true"
+    }
+    
+    try:
+        logger.info("Fetching all data views")
+        
+        async with httpx.AsyncClient(
+            verify=False,
+            timeout=10.0,
+            follow_redirects=True
+        ) as client:
+            response = await client.get(data_views_url, headers=headers)
+            response.raise_for_status()
+            
+            data = response.json()
+            data_views = data.get("data_view", [])
+            
+            logger.info(f"✓ Found {len(data_views)} data views")
+            
+            # Format for easier reading
+            formatted_views = []
+            for dv in data_views:
+                formatted_views.append({
+                    "id": dv.get("id"),
+                    "title": dv.get("title"),
+                    "name": dv.get("name"),
+                    "timeFieldName": dv.get("timeFieldName")
+                })
+            
+            return json.dumps({
+                "total": len(formatted_views),
+                "data_views": formatted_views
+            }, indent=2, default=str)
+            
+    except httpx.HTTPStatusError as e:
+        error_msg = f"HTTP {e.response.status_code}: {e.response.text}"
+        logger.error(f"Failed to list data views: {error_msg}")
+        return json.dumps({
+            "error": "HTTPError",
+            "message": "Failed to list data views",
+            "details": error_msg
+        }, indent=2)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error listing data views: {error_msg}")
+        return json.dumps({
+            "error": "DataViewError",
+            "message": "Failed to list data views",
+            "details": error_msg
+        }, indent=2)
+
+
 @mcp.tool(description="Search and retrieve actual log data from Elasticsearch via Kibana")
 async def search_kibana_logs(
     index_pattern: str,
@@ -114,29 +294,37 @@ async def search_kibana_logs(
     Directly queries Elasticsearch through Kibana to fetch log data matching the 
     specified criteria. Returns the actual log documents as JSON.
     
+    This function attempts multiple API approaches:
+    1. Direct Elasticsearch _search via console proxy
+    2. Fallback to alternative endpoints if available
+    
     Args:
         index_pattern: Index pattern or dataViewId to search
+                      Use get_data_view tool first to resolve data view to index pattern
         time_from: Start time - date math or ISO 8601 format
-        time_to: End time - date math or ISO 8601 format
+        time_to: End time - date math or ISO 8601 format  
         query: KQL or Lucene query string
         fields: Comma-separated field names to return (returns all if empty)
-        size: Maximum number of documents to return (default: 100)
+        size: Maximum number of documents to return (default: 100, max: 500)
     
     Returns:
         JSON string with log documents and metadata
         
     Examples:
         Search last hour of logs:
-        - index_pattern: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
+        - index_pattern: "logs-*"
         - time_from: "now-1h"
         
-        Search errors with specific fields:
+        Search with data view ID (resolve first with get_data_view):
         - index_pattern: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
+        - time_from: "2026-02-22T09:30:00.000Z"
+        - time_to: "2026-02-26T16:30:00.000Z"
+        
+        Search errors with specific fields:
+        - index_pattern: "logs-*"
         - query: "log.level:ERROR"
         - fields: "message,log.level,@timestamp"
-        - time_from: "2026-02-06T00:00:00.000Z"
     """
-    # Get configuration
     kibana_url = KIBANA_URL
     api_key = KIBANA_API_KEY
     
@@ -162,6 +350,9 @@ async def search_kibana_logs(
     # Use dataViewId if provided, otherwise use as index pattern
     if not index_pattern:
         index_pattern = DATA_VIEW_ID
+    
+    # Limit size to reasonable maximum
+    size = min(size, 500)
     
     # Build Elasticsearch query
     es_query = {
@@ -207,54 +398,190 @@ async def search_kibana_logs(
         "Authorization": f"ApiKey {api_key}"
     }
     
-    # Try Elasticsearch API endpoint
-    search_url = f"{kibana_url}/api/console/proxy?path=/{index_pattern}/_search&method=POST"
+    # Try multiple approaches
+    attempts = [
+        # Approach 1: Console proxy with index pattern
+        {
+            "url": f"{kibana_url}/api/console/proxy?path=/{index_pattern}/_search&method=POST",
+            "method": "POST",
+            "data": es_query,
+            "name": "Console Proxy"
+        },
+        # Approach 2: Try with wildcard pattern if it looks like a data view ID
+        {
+            "url": f"{kibana_url}/api/console/proxy?path=/*/_search&method=POST",
+            "method": "POST",
+            "data": es_query,
+            "name": "Console Proxy (all indices)"
+        }
+    ]
+    
+    last_error = None
+    
+    for attempt in attempts:
+        try:
+            logger.info(f"Attempting search via {attempt['name']}: {attempt['url']}")
+            
+            async with httpx.AsyncClient(
+                verify=False,
+                timeout=30.0,
+                follow_redirects=True
+            ) as client:
+                response = await client.post(
+                    attempt['url'],
+                    json=attempt['data'],
+                    headers=headers
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                result = _format_search_response(data)
+                
+                logger.info(f"✓ Search successful via {attempt['name']}: {result['total']} documents found in {result['took']}ms")
+                
+                return json.dumps(result, indent=2, default=str)
+                
+        except httpx.HTTPStatusError as e:
+            error_msg = f"HTTP {e.response.status_code}: {e.response.text}"
+            logger.warning(f"{attempt['name']} failed: {error_msg}")
+            last_error = {
+                "error": "HTTPError",
+                "message": f"Failed to search logs via {attempt['name']}",
+                "details": error_msg
+            }
+            continue
+        except Exception as e:
+            error_msg = str(e)
+            logger.warning(f"{attempt['name']} failed: {error_msg}")
+            last_error = {
+                "error": "SearchError",
+                "message": f"Failed to search logs via {attempt['name']}",
+                "details": error_msg
+            }
+            continue
+    
+    # All attempts failed
+    logger.error("All search attempts failed")
+    return json.dumps(last_error or {
+        "error": "SearchError",
+        "message": "Failed to search logs using all available methods",
+        "suggestion": "1. Verify API key permissions. 2. Try using get_data_view to resolve the index pattern. 3. Check Kibana logs for details."
+    }, indent=2)
+
+
+@mcp.tool(description="Search logs using data view ID with automatic index resolution")
+async def search_logs_by_data_view(
+    view_id: Optional[str] = None,
+    time_from: str = "now-15m",
+    time_to: str = "now",
+    query: str = "",
+    fields: str = "",
+    size: int = 100
+) -> str:
+    """Search logs using a data view ID, automatically resolving to index patterns.
+    
+    This is a higher-level search function that:
+    1. Fetches the data view to get the actual index pattern
+    2. Uses that index pattern to search Elasticsearch  
+    3. Returns formatted results
+    
+    Recommended for most use cases as it handles data view resolution automatically.
+    
+    Args:
+        view_id: Data view ID (uses DATA_VIEW_ID env var if None)
+        time_from: Start time - date math or ISO 8601 format
+        time_to: End time - date math or ISO 8601 format
+        query: KQL or Lucene query string
+        fields: Comma-separated field names to return
+        size: Maximum documents to return (default: 100, max: 500)
+    
+    Returns:
+        JSON string with log documents, data view info, and metadata
+        
+    Examples:
+        Search last hour with default data view:
+        - time_from: "now-1h"
+        
+        Search specific time range:
+        - view_id: "86091596-a33a-4b4b-b825-d387bb6e3c5e"
+        - time_from: "2026-02-22T09:30:00.000Z"
+        - time_to: "2026-02-26T16:30:00.000Z"
+        
+        Search with filters:
+        - query: "log.level:ERROR AND k8s.deployment.name:my-app"
+        - fields: "message,log.level,@timestamp"
+    """
+    kibana_url = KIBANA_URL
+    api_key = KIBANA_API_KEY
+    view_id = view_id or DATA_VIEW_ID
+    
+    if not kibana_url:
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No Kibana URL configured."
+        }, indent=2)
+    
+    if not api_key:
+        return json.dumps({
+            "error": "ConfigurationError",
+            "message": "No API key configured."
+        }, indent=2)
+    
+    # Step 1: Get data view details
+    logger.info(f"Resolving data view: {view_id}")
+    data_view_result = await get_data_view(view_id)
     
     try:
-        logger.info(f"Searching logs via Kibana API: {search_url}")
+        data_view_data = json.loads(data_view_result)
+        if "error" in data_view_data:
+            return data_view_result  # Return error from data view fetch
         
-        async with httpx.AsyncClient(
-            verify=False,
-            timeout=30.0,
-            follow_redirects=True
-        ) as client:
-            response = await client.post(
-                search_url,
-                json=es_query,
-                headers=headers
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            result = _format_search_response(data)
-            
-            logger.info(f"✓ Search successful: {result['total']} documents found in {result['took']}ms")
-            
-            return json.dumps(result, indent=2, default=str)
-            
-    except httpx.HTTPStatusError as e:
-        error_msg = f"HTTP {e.response.status_code}: {e.response.text}"
-        logger.error(f"Search request failed: {error_msg}")
+        data_view = data_view_data.get("data_view", {})
+        index_pattern = data_view.get("title", "")
+        time_field = data_view.get("timeFieldName", "@timestamp")
+        
+        if not index_pattern:
+            return json.dumps({
+                "error": "DataViewError",
+                "message": "Could not resolve index pattern from data view",
+                "data_view_id": view_id
+            }, indent=2)
+        
+        logger.info(f"✓ Resolved data view to index pattern: {index_pattern}")
+        
+        # Step 2: Search using resolved index pattern
+        search_result = await search_kibana_logs(
+            index_pattern=index_pattern,
+            time_from=time_from,
+            time_to=time_to,
+            query=query,
+            fields=fields,
+            size=size
+        )
+        
+        # Parse and enhance result with data view info
+        result = json.loads(search_result)
+        result["data_view"] = {
+            "id": view_id,
+            "title": index_pattern,
+            "timeFieldName": time_field
+        }
+        
+        return json.dumps(result, indent=2, default=str)
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse data view response: {e}")
         return json.dumps({
-            "error": "HTTPError",
-            "message": "Failed to search logs",
-            "details": error_msg
-        }, indent=2)
-    except httpx.RequestError as e:
-        error_msg = str(e)
-        logger.error(f"Connection failed: {error_msg}")
-        return json.dumps({
-            "error": "ConnectionError",
-            "message": "Cannot connect to Kibana",
-            "details": error_msg
+            "error": "ParseError",
+            "message": "Failed to parse data view response",
+            "details": str(e)
         }, indent=2)
     except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Search error: {error_msg}")
+        logger.error(f"Search by data view failed: {e}")
         return json.dumps({
             "error": "SearchError",
-            "message": "Failed to search logs",
-            "details": error_msg
+            "message": "Failed to search logs by data view",
+            "details": str(e)
         }, indent=2)
 
 
