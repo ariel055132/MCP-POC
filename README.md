@@ -56,9 +56,13 @@ podman run --rm -i localhost/weather-mcp:latest
 
 ## Connect in VS Code
 
-This workspace already includes MCP server entries in .vscode/mcp.json.
+* This workspace already includes MCP server entries in .vscode/mcp.json.
 
-After editing MCP config or rebuilding images, restart MCP servers in VS Code so new settings are applied.
+* After editing MCP config or rebuilding images, restart MCP servers in VS Code so new settings are applied.
+
+## Connect in Claude Code
+* Download Claude for Desktop
+* Edit Claude for Desktop App configuration at Claude/claude_desktop_config.json
 
 ## Available Tools
 
